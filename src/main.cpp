@@ -5,6 +5,7 @@
 #include <cstdio>
 #include "rle.hpp"
 #include "huffman.hpp"
+#include "lzw.hpp"
 
 static std::string read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -81,5 +82,8 @@ int main(int argc, char** argv) {
 
     std::string h = huffman_compress(data);
     report("Huffman", data.size(), h, huffman_decompress(h) == data);
+
+    std::string l = lzw_compress(data);
+    report("LZW    ", data.size(), l, lzw_decompress(l) == data);
     return 0;
 }
