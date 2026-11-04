@@ -2,10 +2,20 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <chrono>
 #include <cstdio>
 #include "rle.hpp"
 #include "huffman.hpp"
 #include "lzw.hpp"
+#include "adaptive.hpp"
+
+using Clock = std::chrono::steady_clock;
+using Fn = std::string (*)(const std::string&);
+
+static double ms_since(Clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
 
 static std::string read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -53,20 +63,83 @@ static void show_input(const std::string& name, const std::string& data,
     std::cout << "=============================\n\n";
 }
 
-static void report(const std::string& name, size_t original,
-                   const std::string& packed, bool ok) {
-    std::cout << name << ":\t" << packed.size() << " bytes  ("
-              << 100.0 * packed.size() / original << "% of original)"
-              << "  round trip: " << (ok ? "OK" : "FAIL") << "\n";
+static void print_table_header() {
+    std::printf("%-22s %10s %8s %8s %10s %10s  %s\n",
+                "Method", "Size(B)", "Ratio", "Saved", "Comp(ms)", "Decomp(ms)", "OK");
+}
+
+static void print_row(const std::string& name, size_t original, size_t packed,
+                      double c_ms, double d_ms, bool ok) {
+    double ratio = packed ? static_cast<double>(original) / packed : 0.0;
+    double saved = 100.0 * (1.0 - static_cast<double>(packed) / original);
+    std::printf("%-22s %10zu %7.2fx %7.1f%% %10.2f %10.2f  %s\n",
+                name.c_str(), packed, ratio, saved, c_ms, d_ms, ok ? "OK" : "FAIL");
+}
+
+// One algorithm on the whole file, with timing
+static void run_whole(const std::string& name, Fn comp, Fn decomp, const std::string& data) {
+    auto t0 = Clock::now();
+    std::string packed = comp(data);
+    double c_ms = ms_since(t0);
+
+    t0 = Clock::now();
+    std::string back = decomp(packed);
+    double d_ms = ms_since(t0);
+
+    print_row(name, data.size(), packed.size(), c_ms, d_ms, back == data);
+}
+
+// Adaptive: split into blocks of N lines, best algorithm per block
+static void run_adaptive(const std::string& data, size_t lines_per_block) {
+    std::vector<BlockInfo> infos;
+
+    auto t0 = Clock::now();
+    std::string packed = adaptiveCompress(data, lines_per_block, infos);
+    double c_ms = ms_since(t0);
+
+    t0 = Clock::now();
+    std::string back = adaptiveDecompress(packed);
+    double d_ms = ms_since(t0);
+    bool ok = (back == data);
+
+    std::cout << "\n=========== ADAPTIVE (" << lines_per_block << " lines per block, "
+              << infos.size() << " blocks) ==========\n";
+    std::printf("%-6s %-9s %10s %11s %8s\n", "Block", "Algo", "Original", "Compressed", "Saved");
+
+    const size_t MAX_ROWS = 20;
+    size_t used[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < infos.size(); i++) {
+        const BlockInfo& b = infos[i];
+        used[static_cast<int>(b.algo)]++;
+        if (i < MAX_ROWS) {
+            double saved = 100.0 * (1.0 - static_cast<double>(b.compressedSize) / b.originalSize);
+            std::printf("%-6zu %-9s %10zu %11zu %7.1f%%\n",
+                        i, algoName(b.algo), b.originalSize, b.compressedSize, saved);
+        }
+    }
+    if (infos.size() > MAX_ROWS)
+        std::cout << "... (" << infos.size() - MAX_ROWS << " more blocks not shown)\n";
+
+    std::cout << "\nAlgorithm chosen:  RAW " << used[0] << "   RLE " << used[1]
+              << "   Huffman " << used[2] << "   LZW " << used[3] << "\n\n";
+    print_table_header();
+    print_row("ADAPTIVE (brute-force)", data.size(), packed.size(), c_ms, d_ms, ok);
+    std::cout << "(size includes a 9-byte header per block; compress time includes "
+                 "trying every algorithm on every block)\n";
 }
 
 int main(int argc, char** argv) {
-    std::string name, data;
-    if (argc < 2) {
+    // usage: ./bin/logx [file | demo] [lines_per_block]
+    std::string name = "demo", data;
+    size_t lines_per_block = 500;
+    if (argc >= 2) name = argv[1];
+    if (argc >= 3) lines_per_block = std::stoul(argv[2]);
+    if (lines_per_block == 0) lines_per_block = 500;
+
+    if (name == "demo") {
         name = "(built-in demo log)";
         data = demo_log();
     } else {
-        name = argv[1];
         data = read_file(name);
         if (data.empty()) {
             std::cout << "file is empty or missing\n";
@@ -76,14 +149,12 @@ int main(int argc, char** argv) {
 
     show_input(name, data);
 
-    std::cout << "=========== RESULTS ==========\n";
-    std::string r = rle_compress(data);
-    report("RLE    ", data.size(), r, rle_decompress(r) == data);
+    std::cout << "=========== WHOLE FILE (one algorithm) ==========\n";
+    print_table_header();
+    run_whole("RLE",     rle_compress,     rle_decompress,     data);
+    run_whole("Huffman", huffman_compress, huffman_decompress, data);
+    run_whole("LZW",     lzw_compress,     lzw_decompress,     data);
 
-    std::string h = huffman_compress(data);
-    report("Huffman", data.size(), h, huffman_decompress(h) == data);
-
-    std::string l = lzw_compress(data);
-    report("LZW    ", data.size(), l, lzw_decompress(l) == data);
+    run_adaptive(data, lines_per_block);
     return 0;
 }
